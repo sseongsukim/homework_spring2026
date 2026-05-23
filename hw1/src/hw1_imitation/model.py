@@ -47,12 +47,31 @@ class MSEPolicy(BasePolicy):
     ) -> None:
         super().__init__(state_dim, action_dim, chunk_size)
 
+        input_dim = state_dim
+        output_dim = chunk_size * action_dim  # (Batch_size, chunk_size * action_dim)
+
+        # MLP layers
+        layers = []
+        dims = [input_dim] + list(hidden_dims) + [output_dim]
+        for i, (prev_dim, dim) in enumerate(zip(dims[:-1], dims[1:])):
+            layers.append(nn.Linear(prev_dim, dim))
+            if i < len(dims) - 2:
+                layers.append(nn.ReLU())
+        self.layers = nn.Sequential(*layers)
+
+        self.chunk_size = chunk_size
+        self.action_dim = action_dim
+
     def compute_loss(
         self,
         state: torch.Tensor,
         action_chunk: torch.Tensor,
     ) -> torch.Tensor:
-        raise NotImplementedError
+        batch_size, chunk_size, action_dim = action_chunk.shape
+        actions = action_chunk.reshape(batch_size, -1)
+        pred = self.layers(state)
+        loss = torch.nn.functional.mse_loss(pred, actions)
+        return loss
 
     def sample_actions(
         self,
@@ -60,7 +79,9 @@ class MSEPolicy(BasePolicy):
         *,
         num_steps: int = 10,
     ) -> torch.Tensor:
-        raise NotImplementedError
+        pred_actions = self.layers(state)
+        pred_action_chunk = pred_actions.reshape(-1, self.chunk_size, self.action_dim)
+        return pred_action_chunk
 
 
 class FlowMatchingPolicy(BasePolicy):
@@ -75,13 +96,47 @@ class FlowMatchingPolicy(BasePolicy):
         hidden_dims: tuple[int, ...] = (128, 128),
     ) -> None:
         super().__init__(state_dim, action_dim, chunk_size)
+        noise_dim = 1
+        output_dim = chunk_size * action_dim  # (Batch_size, chunk_size * action_dim)
+        input_dim = state_dim + output_dim + noise_dim
+
+        # MLP layers
+        layers = []
+        dims = [input_dim] + list(hidden_dims) + [output_dim]
+        for i, (prev_dim, dim) in enumerate(zip(dims[:-1], dims[1:])):
+            layers.append(nn.Linear(prev_dim, dim))
+            if i < len(dims) - 2:
+                layers.append(nn.ReLU())
+        self.layers = nn.Sequential(*layers)
+
+        self.input_dim = input_dim
+        self.chunk_size = chunk_size
+        self.action_dim = action_dim
 
     def compute_loss(
         self,
         state: torch.Tensor,
         action_chunk: torch.Tensor,
     ) -> torch.Tensor:
-        raise NotImplementedError
+        batch_size, chunk_size, action_dim = action_chunk.shape
+        actions = action_chunk.reshape(batch_size, -1)
+        device = action_chunk.device
+
+        x_0 = torch.randn(
+            size=(batch_size, chunk_size * action_dim),
+            dtype=torch.float32,
+            device=device,
+        )
+        x_1 = actions
+        t = torch.rand(size=(batch_size, 1), device=device)
+
+        x_t = (1 - t) * x_0 + t * x_1
+        vel = x_1 - x_0
+
+        pred = self.layers(torch.concat([state, x_t, t], dim=-1))
+        loss = torch.nn.functional.mse_loss(pred, vel)
+
+        return loss
 
     def sample_actions(
         self,
@@ -89,7 +144,24 @@ class FlowMatchingPolicy(BasePolicy):
         *,
         num_steps: int = 10,
     ) -> torch.Tensor:
-        raise NotImplementedError
+
+        batch_size, _ = state.shape
+        device = state.device
+
+        actions = torch.randn(
+            size=(batch_size, self.chunk_size * self.action_dim),
+            dtype=torch.float32,
+            device=device,
+        )
+
+        for i in range(num_steps):
+            t = torch.full(
+                size=(batch_size, 1), fill_value=i / num_steps, device=device
+            )
+            vel = self.layers(torch.concat([state, actions, t], dim=-1))
+            actions += vel / num_steps
+
+        return actions.reshape(batch_size, self.chunk_size, self.action_dim)
 
 
 PolicyType: TypeAlias = Literal["mse", "flow"]
