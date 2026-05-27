@@ -2,6 +2,9 @@ import time
 import argparse
 import yaml
 import os
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from agents.dqn_agent import DQNAgent
 from configs import dqn_config
@@ -57,9 +60,7 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
         stacked_frames = True
         frame_history_len = env.observation_space.shape[0]
         assert frame_history_len == 4, "only support 4 stacked frames"
-        replay_buffer = MemoryEfficientReplayBuffer(
-            frame_history_len=frame_history_len
-        )
+        replay_buffer = MemoryEfficientReplayBuffer(frame_history_len=frame_history_len)
     elif len(env.observation_space.shape) == 1:
         stacked_frames = False
         replay_buffer = ReplayBuffer()
@@ -83,11 +84,11 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
 
     reset_env_training()
 
-    for step in tqdm.trange(config["total_steps"], dynamic_ncols=True):
+    for step in tqdm.trange(1, config["total_steps"] + 1, dynamic_ncols=True):
         epsilon = exploration_schedule.value(step)
 
         # TODO(Section 2.4): Compute action
-        action = None
+        action = agent.get_action(observation=observation, epsilon=epsilon)
         # ENDTODO
 
         next_observation, reward, done, info = env.step(action)
@@ -118,23 +119,33 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
         if done:
             reset_env_training()
 
-            logger.log({
-                "Train_EpisodeReturn": info["episode"]["r"],
-                "Train_EpisodeLen": info["episode"]["l"],
-            }, step)
+            logger.log(
+                {
+                    "Train_EpisodeReturn": info["episode"]["r"],
+                    "Train_EpisodeLen": info["episode"]["l"],
+                },
+                step,
+            )
         else:
             observation = next_observation
 
         # Main DQN training loop
         if step >= config["learning_starts"]:
             # TODO(Section 2.4): Sample config["batch_size"] samples from the replay buffer
-            batch = None
+            batch = replay_buffer.sample(config["batch_size"])
             # ENDTODO
 
             batch = ptu.from_numpy(batch)
 
             # TODO(Section 2.4): Train the agent.
-            update_info = None
+            update_info = agent.update(
+                obs=batch["observations"],
+                action=batch["actions"],
+                reward=batch["rewards"],
+                next_obs=batch["next_observations"],
+                done=batch["dones"],
+                step=step,
+            )
             # ENDTODO
 
             # Logging code
@@ -214,7 +225,7 @@ def make_logger(config: dict, args: argparse.Namespace) -> Logger:
         project=args.wandb_project,
         group=config["log_name"],
         name=logdir.split("/")[-1],
-        mode="online",
+        mode=args.wandb_mode,
         config=wandb_config,
     )
 
@@ -223,20 +234,27 @@ def make_logger(config: dict, args: argparse.Namespace) -> Logger:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config_file", "-cfg", type=str, required=True)
+    parser.add_argument(
+        "--config_file",
+        "-cfg",
+        type=str,
+        required=False,
+        default="experiments/dqn/lunarlander.yaml",
+    )
 
-    parser.add_argument("--eval_interval", "-ei", type=int, default=10000)
+    parser.add_argument("--eval_interval", "-ei", type=int, default=2500)
     parser.add_argument("--num_eval_trajectories", "-neval", type=int, default=10)
     parser.add_argument("--num_render_trajectories", "-nvid", type=int, default=0)
 
-    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no_gpu", "-ngpu", action="store_true")
     parser.add_argument("--which_gpu", "-gpu_id", default=0)
     parser.add_argument("--log_interval", type=int, default=1000)
 
     # WandB arguments
     parser.add_argument("--wandb_entity", type=str, default=None)
-    parser.add_argument("--wandb_project", type=str, default="hw3")
+    parser.add_argument("--wandb_project", type=str, default="cs185_285_hw3")
+    parser.add_argument("--wandb_mode", type=str, default="online")
 
     args = parser.parse_args()
 

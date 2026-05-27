@@ -3,6 +3,10 @@ import time
 import yaml
 import argparse
 
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from agents.sac_agent import SoftActorCritic
 from configs import sac_config
 from infrastructure.replay_buffer import ReplayBuffer
@@ -31,9 +35,7 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
     ep_len = config["ep_len"] or env.spec.max_episode_steps
 
     discrete = isinstance(env.action_space, gym.spaces.Discrete)
-    assert (
-        not discrete
-    ), "SAC only supports continuous action spaces."
+    assert not discrete, "SAC only supports continuous action spaces."
 
     ob_shape = env.observation_space.shape
     ac_dim = env.action_space.shape[0]
@@ -62,7 +64,7 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
             action = env.action_space.sample()
         else:
             # TODO(Section 3.1): Select an action
-            action = None
+            action = agent.get_action(observation)
             # ENDTODO
 
         # Step the environment and add the data to the replay buffer
@@ -76,10 +78,13 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
         )
 
         if done:
-            logger.log({
-                "Train_EpisodeReturn": info["episode"]["r"],
-                "Train_EpisodeLen": info["episode"]["l"],
-            }, step)
+            logger.log(
+                {
+                    "Train_EpisodeReturn": info["episode"]["r"],
+                    "Train_EpisodeLen": info["episode"]["l"],
+                },
+                step,
+            )
             observation = env.reset()
         else:
             observation = next_observation
@@ -87,8 +92,16 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
         # Train the agent
         if step >= config["training_starts"]:
             # TODO(Section 3.1): Sample a batch of config["batch_size"] transitions from the replay buffer
-            batch = None
-            update_info = None
+            batch = ptu.from_numpy(replay_buffer.sample(config["batch_size"]))
+
+            update_info = agent.update(
+                observations=batch["observations"],
+                actions=batch["actions"],
+                rewards=batch["rewards"],
+                next_observations=batch["next_observations"],
+                dones=batch["dones"],
+                step=step,
+            )
             # ENDTODO
 
             # Logging
@@ -166,7 +179,7 @@ def make_logger(config: dict, args: argparse.Namespace) -> Logger:
         project=args.wandb_project,
         group=config["log_name"],
         name=logdir.split("/")[-1],
-        mode="online",
+        mode=args.wandb_mode,
         config=wandb_config,
     )
 
@@ -175,20 +188,27 @@ def make_logger(config: dict, args: argparse.Namespace) -> Logger:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config_file", "-cfg", type=str, required=True)
+    parser.add_argument(
+        "--config_file",
+        "-cfg",
+        type=str,
+        required=False,
+        default="experiments/sac/halfcheetah.yaml",
+    )
 
     parser.add_argument("--eval_interval", "-ei", type=int, default=5000)
     parser.add_argument("--num_eval_trajectories", "-neval", type=int, default=10)
     parser.add_argument("--num_render_trajectories", "-nvid", type=int, default=0)
 
-    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no_gpu", "-ngpu", action="store_true")
     parser.add_argument("--which_gpu", "-gpu_id", default=0)
     parser.add_argument("--log_interval", type=int, default=1000)
 
     # WandB arguments
     parser.add_argument("--wandb_entity", type=str, default=None)
-    parser.add_argument("--wandb_project", type=str, default="hw3")
+    parser.add_argument("--wandb_project", type=str, default="cs185_285_hw3")
+    parser.add_argument("--wandb_mode", type=str, default="offline")
 
     args = parser.parse_args()
 
